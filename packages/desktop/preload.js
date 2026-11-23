@@ -88,6 +88,18 @@ async function invokeFavorite(channel, ...args) {
   return result.data;
 }
 
+let saveWorkspaceBeforeExit;
+ipcRenderer.on('workspace-save-request', async (_event, requestId) => {
+  let saved = false;
+  try {
+    // Before the workspace mounts, there is no open draft to submit.
+    saved = !saveWorkspaceBeforeExit || await saveWorkspaceBeforeExit() === true;
+  } catch (error) {
+    console.error('[Desktop] Workspace save before exit failed:', error);
+  }
+  ipcRenderer.send('workspace-save-reply', requestId, saved);
+});
+
 contextBridge.exposeInMainWorld('electronAPI', {
   localServices: {
     fetchModels: async (input) => {
@@ -160,9 +172,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const thinkingListener = (event, thinking) => {
         if (callbacks.onThinking) callbacks.onThinking(thinking);
       };
-      const finishListener = (event) => {
+      const finishListener = (_event, response) => {
         cleanup();
-        if (callbacks.onFinish) callbacks.onFinish();
+        if (callbacks.onFinish) callbacks.onFinish(response);
       };
       const errorListener = (event, error) => {
         cleanup();
@@ -211,9 +223,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const toolCallListener = (event, toolCall) => {
         if (callbacks.onToolCall) callbacks.onToolCall(toolCall);
       };
-      const finishListener = (event) => {
+      const finishListener = (_event, response) => {
         cleanup();
-        if (callbacks.onFinish) callbacks.onFinish();
+        if (callbacks.onFinish) callbacks.onFinish(response);
       };
       const errorListener = (event, error) => {
         cleanup();
@@ -858,9 +870,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const reasoningListener = (event, token) => {
         if (callbacks?.onReasoningToken) callbacks.onReasoningToken(token);
       };
-      const finishListener = () => {
+      const finishListener = (_event, response) => {
         cleanup();
-        if (callbacks?.onComplete) callbacks.onComplete();
+        if (callbacks?.onComplete) callbacks.onComplete(response);
       };
       const errorListener = (event, error) => {
         cleanup();
@@ -897,9 +909,9 @@ const result = await ipcRenderer.invoke('prompt-optimizePromptStream', request, 
       const reasoningListener = (event, token) => {
         if (callbacks?.onReasoningToken) callbacks.onReasoningToken(token);
       };
-      const finishListener = () => {
+      const finishListener = (_event, response) => {
         cleanup();
-        if (callbacks?.onComplete) callbacks.onComplete();
+        if (callbacks?.onComplete) callbacks.onComplete(response);
       };
       const errorListener = (event, error) => {
         cleanup();
@@ -936,9 +948,9 @@ const result = await ipcRenderer.invoke('prompt-optimizeMessageStream', request,
       const reasoningListener = (event, token) => {
         if (callbacks?.onReasoningToken) callbacks.onReasoningToken(token);
       };
-      const finishListener = () => {
+      const finishListener = (_event, response) => {
         cleanup();
-        if (callbacks?.onComplete) callbacks.onComplete();
+        if (callbacks?.onComplete) callbacks.onComplete(response);
       };
       const errorListener = (event, error) => {
         cleanup();
@@ -975,9 +987,9 @@ const result = await ipcRenderer.invoke('prompt-iteratePromptStream', originalPr
       const reasoningListener = (event, token) => {
         if (callbacks?.onReasoningToken) callbacks.onReasoningToken(token);
       };
-      const finishListener = () => {
+      const finishListener = (_event, response) => {
         cleanup();
-        if (callbacks?.onComplete) callbacks.onComplete();
+        if (callbacks?.onComplete) callbacks.onComplete(response);
       };
       const errorListener = (event, error) => {
         cleanup();
@@ -1018,9 +1030,9 @@ const result = await ipcRenderer.invoke('prompt-testPromptStream', systemPrompt,
       const toolCallListener = (event, toolCall) => {
         if (callbacks?.onToolCall) callbacks.onToolCall(toolCall);
       };
-      const finishListener = () => {
+      const finishListener = (_event, response) => {
         cleanup();
-        if (callbacks?.onComplete) callbacks.onComplete();
+        if (callbacks?.onComplete) callbacks.onComplete(response);
       };
       const errorListener = (event, error) => {
         cleanup();
@@ -1382,6 +1394,12 @@ const result = await ipcRenderer.invoke('prompt-testCustomConversationStream', r
 
   // App information
   app: {
+    onWorkspaceSaveRequest: (save) => {
+      saveWorkspaceBeforeExit = save;
+      return () => {
+        if (saveWorkspaceBeforeExit === save) saveWorkspaceBeforeExit = undefined;
+      };
+    },
     getVersion: async () => {
       const result = await withTimeout(
         ipcRenderer.invoke('app-get-version'),
