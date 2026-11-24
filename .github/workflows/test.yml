@@ -43,6 +43,18 @@ jobs:
       - name: Run repo and gate checks
         run: pnpm test:gate
 
+      - name: Check SQLite concurrency, interrupted migrations and business recovery
+        run: node --test scripts/sqlite-storage.test.mjs scripts/sqlite-migration.test.mjs scripts/sqlite-business-regression.test.mjs
+
+      - name: Check MCP business operations, source access and legacy compatibility
+        run: |
+          pnpm --filter @prompt-optimizer/core test:asset-reader
+          pnpm --filter @prompt-optimizer/mcp-server build
+          pnpm --filter @prompt-optimizer/mcp-server test:desktop-readonly
+          pnpm --filter @prompt-optimizer/mcp-server test:desktop-stdio
+          pnpm --filter @prompt-optimizer/mcp-server test:desktop-business
+          pnpm --filter @prompt-optimizer/mcp-server test:browser
+
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
 

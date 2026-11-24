@@ -1,8 +1,26 @@
-# 提示词优化器 MCP 服务器
+# 提示词优化器 MCP
 
-为提示词优化器项目提供的 MCP (Model Context Protocol) 服务器。提供提示词优化工具，支持通过 HTTP 协议连接，可被任何 MCP 兼容客户端使用。
+## 新版 MCP
 
-> **用户部署和使用指南**：请查看 [MCP 服务器用户指南](../../docs/user/mcp-server.md)
+运行 `prompt-optimizer-product-mcp`，默认连接当前用户已有的桌面资料。Windows 安装包的帮助菜单可复制 Codex MCP 配置。使用 npm beta 包时，在 MCP 客户端指定 Node 24.22.1 的 `npx`（Windows 使用 `npx.cmd`），参数为 `--yes --package=@prompt-optimizer/mcp-server@beta prompt-optimizer-product-mcp`。源码构建可运行：
+
+```powershell
+node packages/mcp-server/bin/prompt-optimizer-product-mcp.cjs
+```
+
+- `--desktop-profile=<绝对目录>` 指定已有桌面资料目录。可传多个，首个作为桌面默认资料。
+- `--product-url=<网页 URL>` 将指定网页设为默认来源。使用 `po_sources_authorize` 生成链接，在目标浏览器资料的产品页中授权。
+- 只用网页版也可独立运行 MCP。首次提供完整产品入口地址，或设置默认网页后直接申请链接。日常访问时页面隐藏 MCP 入口。打开链接、确认权限后，保持该标签页开启即可使用网页资料和模型。
+- 已登记网页用 `po_sources_authorize({sourceId})` 重新授权，首次连接用 `po_sources_authorize({productUrl})`。用户在目标浏览器资料中打开链接并确认。相同网址的多份资料需按浏览器和资料名称选择。
+- 用 `po_sources_open` 获取 `connectionId`。此后的查询、写入、模型运行和对照都使用该连接。只需查询桌面资料时，传入 `access: "read"` 以只读模式打开 SQLite。离线网页需授权恢复连接后再操作。
+
+用 `po_catalog` 查同一份业务目录，再用 `po_query`、`po_mutate`、`po_runs_*` 和文本对照工具处理资料。已保存结果写回所选来源，可以在原产品重开。配套 Skill 为 `prompt-optimizer-compare`。
+
+桌面需要已经迁移的 SQLite 资料。使用网页时，要打开含授权桥的新版网页。两端共用工具契约，模型调用和存储操作由所选来源执行。详细参数见 [新版 MCP 使用说明](../../docs/user/desktop-mcp.md)。
+
+## Legacy
+
+原有命令 `prompt-optimizer-mcp` 保留环境变量配置、stdio 和 HTTP `/mcp`。支持系统提示词优化、用户提示词优化和迭代。以下为 Legacy 的配置和开发说明。
 
 ## 功能特性
 
@@ -158,10 +176,7 @@ npx @modelcontextprotocol/inspector
 
 ## 架构设计
 
-此 MCP 服务器遵循零侵入设计原则：
-- 仅使用现有 Core 模块 API，无需修改
-- 采用内存存储实现无状态操作
-- 提供 MCP 和 Core 格式之间的参数适配
+默认优化工具使用独立的内存配置。桌面模式通过已有存储和产品服务读取资产，比较模式把结果保存为独立记录。
 
 ## 许可证
 

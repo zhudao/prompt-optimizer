@@ -11,7 +11,9 @@ import type {
   ContextBundle,
   ImportMode,
   ImportResult,
-  ContextMode
+  ContextMode,
+  ComparisonViewer,
+  DesktopRun
 } from '@prompt-optimizer/core'
 import type { RemoteStorageIpcApi } from '../utils/remote-backup'
 import type { ModelNetworkAPI, ModelNetworkTest } from './model-network'
@@ -202,6 +204,8 @@ interface DataStorageInfo {
   mainSizeBytes: number
   backupFilePath: string
   backupSizeBytes: number
+  legacyFilePath?: string
+  legacySizeBytes?: number
   totalBytes: number
 }
 
@@ -232,6 +236,17 @@ interface ElectronAPI {
   imageModel: ImageModelAPI
   context: ContextAPI
   data: DataAPI
+  savedComparisons?: ComparisonViewer
+  desktopResources?: {
+    register(): Promise<boolean>
+    onRequest(handler: (packet: { id: string; operation: string; arguments: Record<string, unknown> }) => void): () => void
+    complete(packet: { id: string; ok: boolean; result?: unknown; code?: string }): Promise<boolean>
+  }
+  desktopRuns?: {
+    list(): Promise<DesktopRun[]>
+    get(id: string): Promise<DesktopRun>
+    delete(id: string, expectedUpdatedAt: number): Promise<void>
+  }
   remoteStorage: RemoteStorageIpcApi
   on: EventAPI['on']
   off: EventAPI['off']

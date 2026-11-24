@@ -165,6 +165,9 @@ export * from './services/compare/errors'
 
 // 导出数据管理相关
 export { DataManager, createDataManager } from './services/data/manager'
+export { WorkspaceSessionTransfer } from './services/data/workspace-session-transfer'
+export { createDesktopRunRepository, DesktopRunRepositoryError, DESKTOP_RUNS_KEY } from './services/desktop-runs/repository'
+export type { DesktopRun, DesktopRunStatus, DesktopRunRepository } from './services/desktop-runs/repository'
 export type { IDataManager } from './services/data/manager'
 export { ElectronDataManagerProxy } from './services/data/electron-proxy'
 
@@ -208,6 +211,9 @@ export { validateCustomModelConfig } from './utils/environment'
 // 导出IPC序列化工具
 export { safeSerializeForIPC, debugIPCSerializability, safeSerializeArgs } from './utils/ipc-serialization'
 export { applyPatchOperationsToText } from './utils/patch-plan'
+export * from './utils/prompt-variables'
+export { VARIABLE_VALIDATION, getVariableNameValidationError, isReservedVariableName } from './utils/variable-validation'
+export type { ReservedVariableName, VariableNameValidationError } from './utils/variable-validation'
 export type { ApplyPatchResult, ApplyPatchReportItem, ApplyPatchStatus } from './utils/patch-plan'
 
 // 导出存储键常量
@@ -303,3 +309,15 @@ export * from './services/variable-value-generation/errors'
 export { VariableValueGenerationService, createVariableValueGenerationService } from './services/variable-value-generation/service'
 export * from './services/llm/local-discovery'
 export * from './services/llm/local-service-models'
+
+// Source-bound discovery only: no manager initialization or private model export.
+export * from './services/asset-reader'
+export type * from './services/text-comparison/types'
+export { createComparisonRepository } from './services/text-comparison/repository'
+export type { ComparisonRepository, ComparisonStorage } from './services/text-comparison/repository'
+export { createTextComparisonService, TextComparisonError } from './services/text-comparison/runner'
+export type { TextComparisonErrorCode } from './services/text-comparison/runner'
+export { createBrowserBridgeHost } from './services/browser-bridge/session'
+export type { BrowserBridgeHost, BrowserSourceSession } from './services/browser-bridge/session'
+export * from './services/browser-bridge/protocol'
+export { ComparisonRepositoryError } from './services/text-comparison/validation'

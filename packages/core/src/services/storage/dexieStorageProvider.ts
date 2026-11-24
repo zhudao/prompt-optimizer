@@ -1,6 +1,11 @@
 import Dexie, { type Table } from 'dexie';
 import { IStorageProvider } from './types';
 import { StorageError } from './errors';
+import type { ComparisonTransaction } from '../text-comparison/repository';
+
+class ModifierCallbackError {
+  constructor(readonly cause: unknown) {}
+}
 
 /**
  * 数据表接口定义
@@ -115,6 +120,39 @@ export class DexieStorageProvider implements IStorageProvider {
     });
   }
 
+  async getAllEntries(): Promise<Array<[string, string]>> {
+    await this.initialize();
+    return (await this.db.storage.toArray()).map(record => [record.key, record.value]);
+  }
+
+  async getEntriesByPrefix(prefix: string): Promise<Array<[string, string]>> {
+    await this.initialize();
+    return (await this.db.storage.where('key').startsWith(prefix).toArray()).map(record => [record.key, record.value]);
+  }
+
+  async withProductTransaction<Value>(action: () => Promise<Value>): Promise<Value> {
+    await this.initialize();
+    return this.db.transaction('rw', this.db.storage, action);
+  }
+
+  async withWriteTransaction<Value>(modifier: (store: ComparisonTransaction) => Value): Promise<Value> {
+    return this.withProductTransaction(async () => {
+      const values = new Map(await this.getAllEntries());
+      const changed = new Map<string, string | null>();
+      const result = modifier({
+        getItem: key => values.get(key) ?? null,
+        setItem: (key, value) => { values.set(key, value); changed.set(key, value); },
+        removeItem: key => { values.delete(key); changed.set(key, null); },
+      });
+      if (result && typeof (result as { then?: unknown }).then === 'function') throw new StorageError('Asynchronous transaction modifier refused', 'write');
+      for (const [key, value] of changed) {
+        if (value === null) await this.db.storage.delete(key);
+        else await this.db.storage.put({ key, value, timestamp: Date.now() });
+      }
+      return result;
+    });
+  }
+
   /**
    * 设置存储项
    */
@@ -171,19 +209,21 @@ export class DexieStorageProvider implements IStorageProvider {
   ): Promise<void> {
     await this.initialize();
 
-    // 获取键级别的锁
     const lockKey = `atomic_${key}`;
-    if (this.keyLocks.has(lockKey)) {
-      await this.keyLocks.get(lockKey);
-    }
+    const previous = this.keyLocks.get(lockKey) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => this._performAtomicUpdateWithRetry(key, updateFn));
 
-    const lockPromise = this._performAtomicUpdateWithRetry(key, updateFn);
-    this.keyLocks.set(lockKey, lockPromise);
+    const tail = current.catch(() => {});
+    this.keyLocks.set(lockKey, tail);
 
     try {
-      await lockPromise;
+      await current;
     } finally {
-      this.keyLocks.delete(lockKey);
+      if (this.keyLocks.get(lockKey) === tail) {
+        this.keyLocks.delete(lockKey);
+      }
     }
   }
 
@@ -221,6 +261,9 @@ export class DexieStorageProvider implements IStorageProvider {
         await this._performAtomicUpdate(key, updateFn);
         return; // 成功，直接返回
       } catch (error) {
+        if (error instanceof ModifierCallbackError) {
+          throw error.cause;
+        }
         lastError = error as Error;
         console.warn(`Atomic update attempt ${attempt}/${maxRetries} failed (${key}):`, error);
 
@@ -239,6 +282,9 @@ export class DexieStorageProvider implements IStorageProvider {
             console.log(`Fallback update succeeded (${key})`);
             return;
           } catch (fallbackError) {
+            if (fallbackError instanceof ModifierCallbackError) {
+              throw fallbackError.cause;
+            }
             console.error(`Fallback update also failed (${key}):`, fallbackError);
             throw lastError; // 抛出原始错误
           }
@@ -259,6 +305,8 @@ export class DexieStorageProvider implements IStorageProvider {
     key: string,
     updateFn: (currentValue: T | null) => T
   ): Promise<void> {
+    let hasModifierError = false;
+    let modifierError: unknown;
     try {
       // 读取当前值
       const currentRecord = await this.db.storage.get(key);
@@ -267,7 +315,14 @@ export class DexieStorageProvider implements IStorageProvider {
         : null;
 
       // 应用更新函数
-      const newValue = updateFn(currentValue);
+      let newValue: T;
+      try {
+        newValue = updateFn(currentValue);
+      } catch (err) {
+        hasModifierError = true;
+        modifierError = err;
+        throw err;
+      }
 
       // 直接写入新值（不使用事务）
       await this.db.storage.put({
@@ -276,6 +331,9 @@ export class DexieStorageProvider implements IStorageProvider {
         timestamp: Date.now()
       });
     } catch (error) {
+      if (hasModifierError) {
+        throw new ModifierCallbackError(modifierError);
+      }
       console.error(`Simple update failed (${key}):`, error);
       throw new StorageError(`Failed to perform simple update: ${key}`, 'write');
     }
@@ -288,6 +346,8 @@ export class DexieStorageProvider implements IStorageProvider {
     key: string,
     updateFn: (currentValue: T | null) => T
   ): Promise<void> {
+    let hasModifierError = false;
+    let modifierError: unknown;
     try {
       // 使用更安全的事务处理方式
       await this.db.transaction('rw', this.db.storage, async (tx) => {
@@ -299,7 +359,14 @@ export class DexieStorageProvider implements IStorageProvider {
             : null;
 
           // 应用更新函数 - 确保同步执行
-          const newValue = updateFn(currentValue);
+          let newValue: T;
+          try {
+            newValue = updateFn(currentValue);
+          } catch (err) {
+            hasModifierError = true;
+            modifierError = err;
+            throw err;
+          }
 
           // 写入新值
           await tx.table('storage').put({
@@ -309,11 +376,16 @@ export class DexieStorageProvider implements IStorageProvider {
           });
         } catch (innerError) {
           // 事务内部错误，让事务回滚
-          console.error(`Transaction operation failed (${key}):`, innerError);
+          if (!hasModifierError) {
+            console.error(`Transaction operation failed (${key}):`, innerError);
+          }
           throw innerError;
         }
       });
     } catch (error) {
+      if (hasModifierError) {
+        throw new ModifierCallbackError(modifierError);
+      }
       console.error(`Atomic update failed (${key}):`, error);
 
       // 如果是Dexie事务错误，提供更详细的错误信息

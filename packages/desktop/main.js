@@ -1,3 +1,11 @@
+const { buildCodexMcpConfig, isDesktopMcpInvocation } = require('./config/desktop-mcp');
+if (isDesktopMcpInvocation(process.argv[1], process.resourcesPath)) {
+  // A client missing the MCP environment option must not start the desktop app.
+  process.stderr.write('Desktop MCP requires ELECTRON_RUN_AS_NODE=1.\n');
+  require('electron').app.exit(1);
+  return;
+}
+
 const { createStreamRegistry } = require('./stream-runtime');
 const streamRegistry = createStreamRegistry();
 /*
@@ -29,9 +37,9 @@ console.info('[prompt-optimizer/runtime]', {
   electron: process.versions.electron,
 });
 
-const { app, BrowserWindow, ipcMain, shell, session, Menu, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, session, Menu, nativeImage, dialog, clipboard } = require('electron');
 const { autoUpdater } = require('electron-updater');
-const { createShutdownController, requestWorkspaceSave } = require('./config/shutdown');
+const { createShutdownController, createWillQuitStorageCloser, requestWorkspaceSave } = require('./config/shutdown');
 const {
   buildReleaseUrl,
   resolveUpdateRepositoryConfig,
@@ -59,6 +67,7 @@ const {
   applyPageZoomAction,
   getPageZoomActionFromDirection,
 } = require('./config/page-zoom');
+const { showStorageStartupErrorDialog } = require('./config/storage-startup-error');
 const { setupRemoteStorageHandlers } = require('./remote-storage');
 const path = require('path');
 
@@ -93,10 +102,12 @@ const {
   createImageService,
   createTemplateLanguageService,
   createDataManager,
+  createComparisonRepository,
+  createDesktopRunRepository,
+  ComparisonRepositoryError,
   createContextRepo,
   FavoriteManager,
   safeSerializeForIPC,
-  FileStorageProvider,
   runStorageStartupSafetyCheck,
   writeStartupRepairReport,
   // 导入共享的环境变量扫描常量
@@ -104,6 +115,11 @@ const {
   SUFFIX_PATTERN,
   MAX_SUFFIX_LENGTH,
 } = require('@prompt-optimizer/core');
+const {
+  openDesktopStorage,
+  DESKTOP_DATABASE_FILENAME,
+  DESKTOP_STORAGE_WAL_UNSUPPORTED_REASON,
+} = require('@prompt-optimizer/core/node');
 const { createElectronImageInputConverter } = require('./config/image-input-normalizer');
 const convertImageInputWithElectronNativeImage = createElectronImageInputConverter(nativeImage);
 
@@ -113,7 +129,7 @@ const convertImageInputWithElectronNativeImage = createElectronImageInputConvert
  *
  * 这个函数解决的是IPC序列化问题，与存储层的数据一致性问题是不同的：
  * - IPC问题：Vue响应式对象无法被Electron序列化传递
- * - 存储问题：FileStorageProvider的数据一致性和恢复机制
+ * - 存储问题：SQLite事务的数据一致性和恢复机制
  */
 const safeSerialize = safeSerializeForIPC;
 
@@ -123,6 +139,7 @@ let modelNetwork;
 let networkRestarting = false;
 let modelManager, templateManager, historyManager, llmService, promptService, templateLanguageService, preferenceService, dataManager, contextRepo, favoriteManager;
 let imageModelManager, imageService, imageUnderstandingService;
+let savedComparisons, desktopRuns;
 let imageAdapterRegistry; // 全局引用以供 IPC 处理器使用
 let storageProvider; // 全局存储提供器引用，用于退出时保存数据
 
@@ -486,6 +503,13 @@ function createWindow() {
       buildAppMenuTemplate({
         isMac: process.platform === 'darwin',
         onPageZoomAction: handlePageZoomAction,
+        onCopyCodexMcpConfig: app.isPackaged && process.platform === 'win32'
+          ? () => clipboard.writeText(buildCodexMcpConfig({
+            executable: process.execPath,
+            resourcesPath: process.resourcesPath,
+            userDataPath: app.getPath('userData'),
+          }))
+          : undefined,
       })
     )
   );
@@ -582,6 +606,7 @@ function createWindow() {
 }
 
 async function initializeServices() {
+  let startupStage = 'storage';
   try {
     console.log('[Main Process] Initializing core services...');
     
@@ -644,12 +669,16 @@ async function initializeServices() {
       console.warn('[Main Process]   VITE_CUSTOM_API_KEY_claude=your_claude_key npm start');
     }
     
-    console.log('[DESKTOP] Creating file storage provider for desktop environment');
+    console.log('[DESKTOP] Opening SQLite storage for desktop environment');
 
     // 使用标准用户数据目录，支持自动更新
     const userDataPath = app.getPath('userData');
     console.log('[DESKTOP] Using standard user data directory for auto-update compatibility:', userDataPath);
-    storageProvider = new FileStorageProvider(userDataPath);
+    // Do not expose services until the copy, verification and migration marker commit together.
+    const openedStorage = await openDesktopStorage(userDataPath);
+    storageProvider = openedStorage.provider;
+    startupStage = 'services';
+    console.log('[DESKTOP] Storage ready:', openedStorage.migration);
     const startupRepairReport = await runStorageStartupSafetyCheck(storageProvider);
     await writeStartupRepairReport(storageProvider, startupRepairReport);
     
@@ -718,7 +747,9 @@ async function initializeServices() {
     contextRepo = createContextRepo(storageProvider);
 
     console.log('[DESKTOP] Creating Data manager...');
-    dataManager = createDataManager(modelManager, templateManager, historyManager, preferenceService, contextRepo, imageModelManager);
+    savedComparisons = createComparisonRepository(storageProvider);
+    desktopRuns = createDesktopRunRepository(storageProvider);
+    dataManager = createDataManager(modelManager, templateManager, historyManager, preferenceService, contextRepo, imageModelManager, savedComparisons, desktopRuns);
 
     console.log('[DESKTOP] Creating Favorite manager...');
     favoriteManager = new FavoriteManager(storageProvider);
@@ -729,6 +760,23 @@ async function initializeServices() {
   } catch (error) {
     console.error('[Main Process] Failed to initialize core services:', error);
     console.error('[Main Process] Error details:', error.stack);
+    try {
+      let userDataPath = '';
+      try {
+        userDataPath = app.getPath('userData');
+      } catch (_) {}
+      await showStorageStartupErrorDialog({
+        dialog,
+        shell,
+        error,
+        locale: getCurrentUiLocale(),
+        userDataPath,
+        stage: startupStage,
+        walUnsupportedReason: DESKTOP_STORAGE_WAL_UNSUPPORTED_REASON,
+      });
+    } catch (dialogError) {
+      console.error('[Main Process] Failed to display startup error dialog:', dialogError);
+    }
     return false;
   }
 }
@@ -2206,6 +2254,25 @@ function setupIPC() {
     }
   });
 
+  const comparisonRequest = (action) => async (_event, ...args) => {
+    try {
+      return createSuccessResponse(await action(...args));
+    } catch (error) {
+      const code = error instanceof ComparisonRepositoryError ? error.code : 'COMPARISON_STORAGE_FAILED';
+      return { success: false, error: { code, message: `Saved comparison request failed (${code}).` } };
+    }
+  };
+  ipcMain.handle('comparison-list', comparisonRequest(options => savedComparisons.list(options)));
+  ipcMain.handle('comparison-get', comparisonRequest(id => savedComparisons.get(id)));
+  ipcMain.handle('comparison-delete', comparisonRequest((id, revision) => savedComparisons.delete(id, revision)));
+  const runRequest = action => async (_event, ...args) => {
+    try { return createSuccessResponse(await action(...args)); }
+    catch { return { success: false, error: { message: 'Saved desktop run request failed.' } }; }
+  };
+  ipcMain.handle('desktop-runs-list', runRequest(async () => (await desktopRuns.list()).filter(run => run.saved)));
+  ipcMain.handle('desktop-runs-get', runRequest(id => desktopRuns.get(id)));
+  ipcMain.handle('desktop-runs-delete', runRequest((id, updatedAt) => desktopRuns.delete(id, updatedAt)));
+
   // Data Manager handlers
   ipcMain.handle('data-exportAllData', async (event) => {
     try {
@@ -2239,7 +2306,8 @@ function setupIPC() {
   ipcMain.handle('data-getStorageInfo', async () => {
     try {
       const userDataPath = app.getPath('userData');
-      const mainFilePath = path.join(userDataPath, 'prompt-optimizer-data.json');
+      const mainFilePath = path.join(userDataPath, DESKTOP_DATABASE_FILENAME);
+      const legacyFilePath = path.join(userDataPath, 'prompt-optimizer-data.json');
       const backupFilePath = path.join(userDataPath, 'prompt-optimizer-data.json.backup');
 
       const statSafe = async (p) => {
@@ -2251,8 +2319,10 @@ function setupIPC() {
         }
       };
 
-      const mainSizeBytes = await statSafe(mainFilePath);
+      const mainSizeBytes = await statSafe(mainFilePath) +
+        await statSafe(`${mainFilePath}-wal`) + await statSafe(`${mainFilePath}-shm`);
       const backupSizeBytes = await statSafe(backupFilePath);
+      const legacySizeBytes = await statSafe(legacyFilePath);
 
       return createSuccessResponse({
         userDataPath,
@@ -2260,7 +2330,9 @@ function setupIPC() {
         mainSizeBytes,
         backupFilePath,
         backupSizeBytes,
-        totalBytes: mainSizeBytes + backupSizeBytes,
+        legacyFilePath,
+        legacySizeBytes,
+        totalBytes: mainSizeBytes + backupSizeBytes + legacySizeBytes,
       });
     } catch (error) {
       return createErrorResponse(error);
@@ -2370,19 +2442,33 @@ function setupIPC() {
 }
 
 // This method is called when Electron has finished initialization.
+const willQuitStorageCloser = createWillQuitStorageCloser({
+  app,
+  getStorage: () => storageProvider,
+  onError: error => console.error('[DESKTOP] Failed to close storage:', error),
+});
+
 app.whenReady().then(async () => {
   const servicesInitialized = await initializeServices();
-  if (servicesInitialized) {
-    // 必须先设置IPC监听器，再创建窗口
-    // 以防止窗口中的代码在监听器准备好之前就发送IPC消息
-    setupIPC();
-    createWindow();
-  } else {
+  if (!servicesInitialized) {
     console.error('[Main Process] Failed to start application due to service initialization failure.');
-    // Optionally, show a dialog to the user
-    // dialog.showErrorBox('Application Error', 'Could not initialize critical services.');
-    app.quit();
+    willQuitStorageCloser.markClosed();
+    if (storageProvider && typeof storageProvider.close === 'function') {
+      try {
+        await storageProvider.close();
+      } catch (closeError) {
+        console.error('[DESKTOP] Failed to close storage after startup failure:', closeError);
+      }
+    }
+    app.exit(1);
+    return;
   }
+
+  // 必须先设置IPC监听器，再创建窗口
+  // 以防止窗口中的代码在监听器准备好之前就发送IPC消息
+  setupIPC();
+  require('./config/desktop-resources').installDesktopResources(ipcMain, storageProvider);
+  createWindow();
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
@@ -2414,6 +2500,9 @@ app.on('window-all-closed', function () {
     app.quit();
   }
 });
+
+// Also runs for updater quits and macOS quits after the last window was closed.
+app.on('will-quit', willQuitStorageCloser.onWillQuit);
 
 // 忽略版本管理辅助函数（全局作用域）
 const getIgnoredVersions = async () => {
@@ -2597,6 +2686,9 @@ async function setupUpdateHandlers() {
 
   autoUpdater.on('error', (error) => {
     console.error('[Updater] Update error:', error);
+    if (isUpdaterQuitting) {
+      isUpdaterQuitting = false;
+    }
 
     // 如果是 403 错误，提供基本的调试信息
     if (error.code === 'HTTP_ERROR_403' || (error.message && error.message.includes('403'))) {

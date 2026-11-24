@@ -59,6 +59,8 @@
                         @open-model-manager="modelManager.showConfig = true"
                         @open-favorites="openFavoritesPage"
                         @open-data-manager="showDataManager = true"
+                        @open-desktop-runs="showDesktopRuns = true"
+                        :desktop-runs-available="!!desktopRunsViewer"
                         @open-variables="handleOpenVariableManager()"
                         :favorites-active="isFavoritesRoute"
                         :backup-reminder-due="dataBackupReminderDue"
@@ -92,6 +94,7 @@
                     </RouterView>
                 </template>
             </MainLayoutUI>
+            <BrowserBridgePanel v-if="services.browserBridge" :host="services.browserBridge" :product-version="appVersion" />
 
             <!-- Modals and Drawers that are conditionally rendered -->
             <ModelManagerUI
@@ -131,6 +134,11 @@
                 :prepare-restore="prepareSessionRestore"
                 @import-code-consumed="incomingBackupImportCode = ''"
                 @imported="handleDataImported"
+            />
+            <DesktopRunsDrawer
+                v-if="desktopRunsViewer"
+                v-model:show="showDesktopRuns"
+                :viewer="desktopRunsViewer"
             />
 
             <!-- 收藏管理对话框 -->
@@ -252,6 +260,7 @@ import {
 } from "vue";
 import { RouterView } from "vue-router";
 import { setLucideProps } from '@lucide/vue';
+import { createProductResourceHandler, startDesktopResourceWorker } from '../../utils/desktop-resource-worker';
 import { APP_ICON_DEFAULTS } from '../../config/icons';
 
 setLucideProps(APP_ICON_DEFAULTS);
@@ -304,6 +313,11 @@ import ToolManagerModal from '../tool/ToolManagerModal.vue'
 import ContextEditor from '../context-mode/ContextEditor.vue'
 import PromptPreviewPanel from '../PromptPreviewPanel.vue'
 import AppHeaderActions from './AppHeaderActions.vue'
+import BrowserBridgePanel from './BrowserBridgePanel.vue'
+import DesktopRunsDrawer from '../desktop/DesktopRunsDrawer.vue'
+const desktopRunsViewer = computed(() => services.value?.browserRuns ??
+  (typeof window === 'undefined' ? undefined : window.electronAPI?.desktopRuns))
+const showDesktopRuns = ref(false)
 import AppCoreNav from './AppCoreNav.vue'
 import { createWorkspaceRouteSwitchController } from './workspaceRouteSwitch'
 import { favoritesPageActionsKey } from '../favorites/favorites-page-context'
@@ -2160,6 +2174,40 @@ const prepareSessionRestore = async (): Promise<(() => void) | null> => {
   autosave.cancelPending();
   return resume;
 };
+let stopProductResources: (() => void) | undefined;
+watch(isReady, ready => {
+  if (!ready || !services.value || stopProductResources) return;
+  const appServices = services.value;
+  const options = { services: appServices, flush: () => sessionManager.saveAllSessions(), prepareRestore: prepareSessionRestore };
+  const bridge = appServices.browserBridge;
+  if (!bridge) {
+    stopProductResources = startDesktopResourceWorker(options);
+    return;
+  }
+  const resource = createProductResourceHandler(options);
+  const afterReply = () => setTimeout(() => window.location.reload(), 150);
+  bridge.setProductOperations({
+    async mutate(domain, action) {
+      if (!['workspaces', 'settings', 'variables', 'data'].includes(domain)) return action();
+      const release = await prepareSessionRestore();
+      if (!release) throw Object.assign(new Error('Workspace busy'), { code: 'WORKSPACE_BUSY' });
+      try {
+        const result = await action();
+        afterReply();
+        return result;
+      } finally { release(); }
+    },
+    async resource(input) {
+      const { operation, ...args } = input;
+      if (typeof operation !== 'string') throw Object.assign(new Error('Invalid input'), { code: 'INVALID_INPUT' });
+      const { result, reload } = await resource(operation, args);
+      if (reload) afterReply();
+      return result;
+    },
+  });
+  stopProductResources = () => bridge.setProductOperations(undefined);
+}, { immediate: true });
+onBeforeUnmount(() => { stopProductResources?.(); });
 const prepareForUpdate = createAppUpdatePreparation({
   isBusy: () => isWorkspaceBusy() || sessionManager.isRestoring || hasCompactModalLayers() ||
     modelManager.showConfig || templateManagerState.showTemplates || historyManager.showHistory ||

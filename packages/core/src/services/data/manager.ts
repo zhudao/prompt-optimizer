@@ -13,6 +13,8 @@ import {
 import { stripErrorCodeMarkers, toErrorWithCode } from '../../utils/error';
 import { WorkspaceSessionTransfer } from './workspace-session-transfer';
 import type { IImportExportable } from '../../interfaces/import-export';
+import type { ComparisonRepository } from '../text-comparison/repository';
+import type { DesktopRunRepository } from '../desktop-runs/repository';
 
 /**
  * 数据导入导出管理器
@@ -60,7 +62,9 @@ export class DataManager implements IDataManager {
     historyManager: IHistoryManager,
     preferenceService: IPreferenceService,
     contextRepo: ContextRepo,
-    imageModelManager?: IImageModelManager
+    imageModelManager?: IImageModelManager,
+    private readonly savedComparisons?: ComparisonRepository,
+    private readonly desktopRuns?: DesktopRunRepository
   ) {
     this.modelManager = modelManager;
     this.imageModelManager = imageModelManager;
@@ -84,7 +88,15 @@ export class DataManager implements IDataManager {
       data['userTemplates'] = await this.templateManager.exportData();
       data['userSettings'] = await this.preferenceService.exportData();
       data['contexts'] = await this.contextRepo.exportData();
+      if (this.savedComparisons) {
+        const comparisonBackup = await this.savedComparisons.exportData();
+        if (comparisonBackup.records.length > 0) data['savedComparisons'] = comparisonBackup;
+      }
       data['workspaceSessions'] = await this.workspaceSessions.exportData();
+      if (this.desktopRuns) {
+        const runs = await this.desktopRuns.exportData();
+        if (runs.runs.length) data['desktopRuns'] = runs;
+      }
     } catch (error) {
       console.error('Failed to export data:', error);
       if (typeof (error as any)?.code === 'string') {
@@ -128,14 +140,14 @@ export class DataManager implements IDataManager {
       dataToImport = exportData.data;
     }
     // Old format: direct data object { history: [...], models: [...], ... }
-    else if (exportData.history || exportData.models || exportData.imageModels || exportData.userTemplates || exportData.userSettings || exportData.contexts || exportData.workspaceSessions) {
+    else if (exportData.history || exportData.models || exportData.imageModels || exportData.userTemplates || exportData.userSettings || exportData.contexts || exportData.workspaceSessions || exportData.savedComparisons || exportData.desktopRuns) {
       dataToImport = exportData;
     }
     else {
       throw new DataInvalidFormatError('Unrecognized data structure')
     }
 
-    const supported = new Set(['history', 'models', 'imageModels', 'userTemplates', 'userSettings', 'contexts', 'workspaceSessions']);
+    const supported = new Set(['history', 'models', 'imageModels', 'userTemplates', 'userSettings', 'contexts', 'workspaceSessions', 'savedComparisons', 'desktopRuns']);
     if (Object.keys(dataToImport).some(key => !supported.has(key))) {
       throw new DataInvalidFormatError('Unsupported app backup section')
     }
@@ -144,6 +156,9 @@ export class DataManager implements IDataManager {
 
   private importServices(): Array<{ service: IImportExportable; dataKey: string }> {
     return [
+      // Resolve comparison conflicts before restoring sections that replace existing data.
+      ...(this.savedComparisons ? [{ service: this.savedComparisons, dataKey: 'savedComparisons' }] : []),
+      ...(this.desktopRuns ? [{ service: this.desktopRuns, dataKey: 'desktopRuns' }] : []),
       { service: this.historyManager, dataKey: 'history' },
       { service: this.modelManager, dataKey: 'models' },
       ...(this.imageModelManager ? [{ service: this.imageModelManager, dataKey: 'imageModels' }] : []),
@@ -155,6 +170,10 @@ export class DataManager implements IDataManager {
   }
 
   private async validateSections(data: Record<string, unknown>): Promise<void> {
+    if (!this.desktopRuns && data.desktopRuns !== undefined) throw new DataInvalidFormatError('Run restoration requires desktop storage');
+    if (!this.savedComparisons && data.savedComparisons !== undefined) {
+      throw new DataInvalidFormatError('Saved comparison restoration requires desktop storage');
+    }
     if (!this.imageModelManager && data.imageModels !== undefined &&
       (!Array.isArray(data.imageModels) || data.imageModels.length > 0)) {
       throw new DataInvalidFormatError('Image model restoration is unavailable')
@@ -222,7 +241,9 @@ export function createDataManager(
   historyManager: IHistoryManager,
   preferenceService: IPreferenceService,
   contextRepo: ContextRepo,
-  imageModelManager?: IImageModelManager
+  imageModelManager?: IImageModelManager,
+  savedComparisons?: ComparisonRepository,
+  desktopRuns?: DesktopRunRepository
 ): DataManager {
-  return new DataManager(modelManager, templateManager, historyManager, preferenceService, contextRepo, imageModelManager);
+  return new DataManager(modelManager, templateManager, historyManager, preferenceService, contextRepo, imageModelManager, savedComparisons, desktopRuns);
 }
