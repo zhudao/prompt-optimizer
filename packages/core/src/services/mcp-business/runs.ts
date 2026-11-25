@@ -1,8 +1,10 @@
 import { v4 as randomUUID } from 'uuid';
 import { hashText } from '../../utils/portable-crypto';
 import { createDesktopRunRepository, type DesktopRun } from '../desktop-runs/repository';
+import { createRunArchive } from '../desktop-runs/archive';
+import { createComparisonRepository } from '../text-comparison/repository';
 import { decodeTextModelSelection } from '../model/selection';
-import { findMissingVariables, replaceVariablesInContent, type StreamHandlers } from '../../index';
+import { buildPromptExecutionContext, scanVariableNames, type StreamHandlers } from '../../index';
 import { createReadonlyAssetReader, type AssetReaderRevisionKeys } from '../asset-reader/reader';
 import type { AssetVersionSelection } from '../asset-reader/types';
 import { BusinessStage, redactConfiguration, type BusinessStorage, type Snapshot } from './services';
@@ -22,12 +24,14 @@ type ActiveRun = { controller: AbortController; task: Promise<void>; state: Desk
 
 export class ProductRuns {
   readonly repository;
+  private readonly archive;
   private readonly active = new Map<string, ActiveRun>();
   private closing = false;
 
   constructor(private readonly provider: BusinessStorage, private readonly sourceId: string,
-    private readonly owner: { id: string; isGone(id: string): boolean }, private readonly revisionKeys: AssetReaderRevisionKeys) {
+    private readonly owner: { id: string; isGone(id: string): boolean | Promise<boolean> }, private readonly revisionKeys: AssetReaderRevisionKeys) {
     this.repository = createDesktopRunRepository(provider);
+    this.archive = createRunArchive(this.repository, createComparisonRepository(provider));
   }
 
   async start(input: RunInput, requestKey: string, snapshot: Snapshot): Promise<DesktopRun> {
@@ -47,7 +51,8 @@ export class ProductRuns {
       throw new DesktopBusinessError('INVALID_TIMEOUT');
     }
     const requestHash = hashText(JSON.stringify(input));
-    const previous = (await this.repository.list()).find(run => run.requestKey === requestKey);
+    const runs = await this.repository.list();
+    const previous = runs.find(run => run.requestKey === requestKey);
     if (previous) {
       if (previous.deleted) throw new DesktopBusinessError('RUN_DELETED');
       if (previous.requestHash !== requestHash) throw new DesktopBusinessError('REQUEST_KEY_REUSED');
@@ -94,16 +99,28 @@ export class ProductRuns {
         if (candidate.promptField !== undefined && !['systemPrompt', 'userPrompt'].includes(candidate.promptField as string)) throw new DesktopBusinessError('INVALID_INPUT');
         candidate[(candidate.promptField as string) ?? 'systemPrompt'] = version.content.text;
       }
-      if (candidate.variables !== undefined) {
-        const variables = candidate.variables as Record<string, string>;
-        if (!variables || typeof variables !== 'object' || Array.isArray(variables) || Object.values(variables).some(value => typeof value !== 'string')) {
+      if (candidate.variables !== undefined || candidate.source || (input.kind === 'test' && input.source)) {
+        const supplied = candidate.variables === undefined ? {} : candidate.variables;
+        if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied) || Object.values(supplied).some(value => typeof value !== 'string')) {
           throw new DesktopBusinessError('INVALID_VARIABLES');
         }
-        for (const field of ['systemPrompt', 'userPrompt']) {
-          if (typeof candidate[field] !== 'string') continue;
-          if (findMissingVariables(candidate[field] as string, variables).length) throw new DesktopBusinessError('MISSING_VARIABLES');
-          candidate[field] = replaceVariablesInContent(candidate[field] as string, variables, 1024 * 1024);
+        const saved = snapshot.get('pref:variableManager.storage');
+        const defaults = saved ? JSON.parse(saved).customVariables : {};
+        const used: Record<string, string> = Object.create(null);
+        for (const [field, rawField] of [['systemPrompt', 'rawSystemPrompt'], ['userPrompt', 'rawUserPrompt']]) {
+          const prompt = candidate[field];
+          if (typeof prompt !== 'string') continue;
+          const available = { ...defaults, ...supplied, currentPrompt: prompt, userQuestion: prompt };
+          const variables = Object.fromEntries(scanVariableNames(prompt).filter(key =>
+            Object.prototype.hasOwnProperty.call(available, key) && typeof available[key] === 'string').map(key => [key, available[key]]));
+          const rendered = buildPromptExecutionContext(prompt, variables, 1024 * 1024);
+          if (rendered.missingVariables.length) throw new DesktopBusinessError('MISSING_VARIABLES');
+          if (rendered.forbiddenTemplateSyntax.length) throw new DesktopBusinessError('FORBIDDEN_TEMPLATE_SYNTAX');
+          candidate[rawField] = prompt;
+          candidate[field] = rendered.renderedContent;
+          Object.assign(used, variables);
         }
+        candidate.variables = used;
       }
       return candidate;
     };
@@ -131,6 +148,8 @@ export class ProductRuns {
       status: 'running', createdAt: Date.now(), updatedAt: Date.now(), saved: false,
       input: redactConfiguration({ ...input, request, executionModels, sourceRevision: input.source?.expectedRevision }), partial: '', reasoning: '',
     };
+    if (this.closing) throw new DesktopBusinessError('SOURCE_CLOSING');
+    for (const run of runs) await this.reconcile(run, true);
     if (this.closing) throw new DesktopBusinessError('SOURCE_CLOSING');
     const persisted = await this.repository.create(state);
     if (persisted.id !== state.id) return this.get(persisted.id);
@@ -185,7 +204,7 @@ export class ProductRuns {
         if (controller.signal.aborted) onAbort();
       });
       let output: unknown;
-      try { output = await Promise.race([this.perform(stage, kind, request, handlers), interrupted]); }
+      try { output = await Promise.race([this.perform(stage, kind, request, handlers, state), interrupted]); }
       finally { if (onAbort) controller.signal.removeEventListener('abort', onAbort); }
       controller.signal.throwIfAborted();
       state.status = 'succeeded'; state.output = output ?? state.partial;
@@ -201,7 +220,7 @@ export class ProductRuns {
     }
   }
 
-  private async perform(stage: BusinessStage, kind: RunInput['kind'], request: Record<string, unknown>, handlers: StreamHandlers): Promise<unknown> {
+  private async perform(stage: BusinessStage, kind: RunInput['kind'], request: Record<string, unknown>, handlers: StreamHandlers, state?: DesktopRun): Promise<unknown> {
     if (kind === 'extract-variables') return (await stage.service('variableExtraction')).extract(request);
     if (kind === 'generate-variable-values') return (await stage.service('variableValues')).generate(request);
     if (kind === 'model-list' || kind === 'model-test') {
@@ -239,19 +258,34 @@ export class ProductRuns {
     if (kind === 'test-batch') {
       const candidates = request.candidates;
       if (!Array.isArray(candidates) || candidates.length < 2 || candidates.length > 4) throw new DesktopBusinessError('INVALID_CANDIDATES');
-      return Promise.all(candidates.map(async (candidate: Record<string, unknown>, index: number) => {
-        let text = '';
-        try {
-          await this.perform(stage, 'test', candidate, { ...handlers, onToken: token => {
-            handlers.signal?.throwIfAborted();
-            if (text.length + token.length > 1024 * 1024) throw new DesktopBusinessError('OUTPUT_LIMIT_REACHED');
-            text += token;
-          } });
-          return { id: String(index + 1), status: 'succeeded', output: text };
-        } catch (error) {
-          return { id: String(index + 1), status: handlers.signal?.aborted ? 'cancelled' : 'failed', output: text, error: publicBusinessError(error) };
-        }
+      const results = candidates.map((_, index) => ({
+        id: String(index + 1), status: 'running', output: '', reasoning: '', error: undefined as DesktopRun['error'],
       }));
+      if (state) state.output = results;
+      const cancel = () => {
+        for (const result of results) if (result.status === 'running') result.status = 'cancelled';
+      };
+      handlers.signal?.addEventListener('abort', cancel, { once: true });
+      try {
+        await Promise.all(candidates.map(async (candidate, index) => {
+          const result = results[index];
+          function append(field: 'output' | 'reasoning', token: string) {
+            handlers.signal?.throwIfAborted();
+            if (result[field].length + token.length > 1024 * 1024) throw new DesktopBusinessError('OUTPUT_LIMIT_REACHED');
+            result[field] += token;
+          }
+          try {
+            await this.perform(stage, 'test', candidate, { ...handlers, onToken: token => append('output', token),
+              onReasoningToken: token => append('reasoning', token) });
+            handlers.signal?.throwIfAborted();
+            result.status = 'succeeded';
+          } catch (error) {
+            result.status = handlers.signal?.aborted ? 'cancelled' : 'failed';
+            result.error = publicBusinessError(error);
+          }
+        }));
+        return results;
+      } finally { handlers.signal?.removeEventListener('abort', cancel); }
     }
     const service = await stage.service('prompt');
     if (kind === 'optimize') await service.optimizePromptStream(request, handlers);
@@ -264,15 +298,31 @@ export class ProductRuns {
     return undefined;
   }
 
-  async get(id: string, recover = true): Promise<DesktopRun> {
-    const active = this.active.get(id);
-    const state = active?.state ?? await this.repository.get(id);
-    if (state.status === 'running' && state.ownerId !== this.owner.id && this.owner.isGone(state.ownerId)) {
-      const interrupted = {
-        status: 'interrupted' as const, error: publicBusinessError(new DesktopBusinessError('RUN_INTERRUPTED')),
-      };
-      return recover ? this.repository.update(id, interrupted) : { ...state, ...interrupted };
+  private async reconcile(state: DesktopRun, persist: boolean): Promise<DesktopRun> {
+    if (state.status !== 'running' || state.ownerId === this.owner.id || !await this.owner.isGone(state.ownerId)) return state;
+    const error = publicBusinessError(new DesktopBusinessError('RUN_INTERRUPTED'));
+    if (!persist) return { ...state, status: 'interrupted', error, updatedAt: state.updatedAt + 1 };
+    return this.repository.interrupt(state.id, state.ownerId, error);
+  }
+
+  async list(persist: boolean): Promise<DesktopRun[]> {
+    const runs = await this.archive.list();
+    return Promise.all(runs.map(run => this.reconcile(run, persist)));
+  }
+
+  async delete(id: string, expectedUpdatedAt: number): Promise<void> {
+    const state = (await this.repository.list()).find(run => run.id === id);
+    if (state?.status === 'running') {
+      const current = await this.reconcile(state, true);
+      if (current.status === 'interrupted' && expectedUpdatedAt === state.updatedAt && current.updatedAt === state.updatedAt + 1) {
+        expectedUpdatedAt = current.updatedAt;
+      }
     }
+    await this.archive.delete(id, expectedUpdatedAt);
+  }
+
+  async get(id: string, recover = true): Promise<DesktopRun> {
+    const state = await this.reconcile(this.active.get(id)?.state ?? await this.archive.get(id), recover);
     const output = structuredClone(state);
     if (output.status === 'succeeded' && output.output === undefined) output.output = output.partial;
     return output;
@@ -305,6 +355,7 @@ export class ProductRuns {
       await stage.commit(this.provider);
       return saved;
     }
+    if (run.saved) return run;
     return this.repository.update(id, { ...run, saved: true, input: redactConfiguration(run.input) });
   }
 

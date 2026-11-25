@@ -4,13 +4,13 @@
 
 ## 安装和选择资料
 
-在 Windows 桌面应用中使用 **Help → Copy Codex MCP Configuration**，将生成的配置段粘贴到 Codex 的 `config.toml`。从源码构建时，使用 Node 24.22.1 构建 Core 和 MCP 后运行：
+在 MCP 客户端中可通过 npm 安装包运行（支持 Node.js 24.x、25.x 和 26.x）：命令填 `npx`（Windows 上为 `npx.cmd`），参数填 `--yes --package=@prompt-optimizer/mcp-server@beta prompt-optimizer-product-mcp`，后面可追加资料参数。从源码构建时，使用 Node 24.22.1 构建 Core 和 MCP 后运行：
 
 ```powershell
 node packages/mcp-server/bin/prompt-optimizer-product-mcp.cjs
 ```
 
-使用本地构建的 npm 包时，可在 MCP 客户端把命令设为 Node 24.22.1 所在安装目录下的 `npx`（Windows 上为 `npx.cmd`），参数设为 `--yes --package=<本地 tgz 绝对路径> prompt-optimizer-product-mcp`，并在后面追加所需的资料参数。用 `pnpm --filter @prompt-optimizer/mcp-server pack:npm` 生成 `dist/npm/` 下的安装包。
+用 `pnpm --filter @prompt-optimizer/mcp-server pack:npm` 在 `dist/npm/` 下生成安装包。运行这个包支持 Node.js 24.x、25.x 和 26.x。在 MCP 客户端中，命令填 `npx`（Windows 上为 `npx.cmd`），参数填 `--yes --package=<本地 tgz 绝对路径> prompt-optimizer-product-mcp`，后面可追加资料参数。
 
 无参数时使用当前用户的默认桌面资料。用 `--desktop-profile=<绝对 userData 目录>` 指定已迁移的桌面资料，可传多个。也可用 `--product-url=<产品网页 URL>` 将网页设为默认来源，在实际网页打开一次性链接授权。MCP 只访问已存在的桌面 SQLite，网页通过明确授权的产品页面读写本地存储。
 
@@ -51,7 +51,7 @@ HTTPS 部署需要包含网页授权组件，并允许网页连接本机 MCP 的
 | `variables` | 全局变量的列表、读取、设置和删除；与 UI 共用名称规则，不覆盖其余变量管理状态 |
 | `workspaces` | 导出、校验和导入各子模式的会话快照（包括多消息、变量、图片模式及 Arena） |
 | `settings` | 偏好设置读取、枚举、导入导出、设置和删除；会话必须用 `workspaces` 的校验路径 |
-| `data` | 应用 JSON 的校验、导入和脱敏导出；含会话、已保存比较及已保存 MCP 成果，不含收藏/图片二进制 |
+| `data` | 校验、导入和脱敏导出应用 JSON，涵盖历史记录、模型配置、用户模板、设置、上下文和工作区会话 |
 
 参数位置及必选项由 `po_catalog` 返回，例如：
 
@@ -87,13 +87,13 @@ HTTPS 部署需要包含网页授权组件，并允许网页连接本机 MCP 的
 
 `inputRunId` 可以将成功优化的文本直接交给 test，或将成功测试的原输入/输出快照交给 result 评估。先 `po_runs_start`，再轮询 `po_runs_get`；成功启动不代表执行成功。批次顶层 succeeded 代表编排结束，还须检查每个候选的 status。取消会保留已收到的文本，但不能保证服务商停止已提交的工作/计费。失败不伪装成成功结果。
 
-`po_runs_save` 默认只归档，不修改当前草稿、收藏正文或采纳答案。重新打开产品后，从顶部 **「MCP 运行成果」** 按 runId 或列表重开；原变量工作区 **「已保存比较」** 仍是独立入口。删除须带最新 `expectedUpdatedAt`，保留最小防重标记，旧重试或备份不能复活已删除运行。记录最多 200 条非删除项、总载荷 32 MiB；到限显式拒绝，不自动清理用户成果。
+`po_runs_save` 默认将结果归档到当前资料，可用 `po_runs_list(savedOnly=true)` 与 `po_runs_get` 回看。要让优化或迭代结果随产品备份迁移，保存时传入 `target: "history"` 写入「历史记录」。也可通过 `po_mutate` 将定稿提示词写入「收藏夹」，随完整 ZIP 迁移。删除归档须带最新的 `expectedUpdatedAt`，删除后保留防重标记。最多可保留 200 条未删除记录，总载荷上限为 32 MiB，达到上限时返回错误。
 
 ## 文本对照与 Skill
 
-在同一新入口中，用 `po_sources_list` 返回的 `sourceId` 调用 `po_sources_open`，指定 `access: "write"`。其返回的 `connectionId` 用于 `po_models_list`、`po_assets_*`、`po_tests_*` 和 `po_comparisons_*`。这些工具支持预览实际模型参数、对照同一收藏的两个模型或同一模型的两版提示词，以及保存和回读完整原始结果。
+使用 `po_query` 查看已启用模型（`models.getEnabledModels`）和收藏版本（`assets.listAssets/listAssetVersions/getAssetVersion`）。使用 `po_runs_start` 的 `test-batch` 运行 2–4 个候选。每个候选都调用产品的普通文本测试，可以共享提示词比较模型，也可以共享模型比较提示词。用 `po_runs_get` 查看每一项的输入、模型、输出和状态，需要长期保存时用 `po_runs_save` 归档并通过 `po_runs_list(savedOnly=true)` / `po_runs_get` 回看，或将定稿提示词写入「收藏夹」。
 
-配置新命令后，在包含仓库 Skill 的 Codex 项目里可调用 `$prompt-optimizer-compare`。可在同一收藏版本上对照两个已存模型，或用同一个已存模型对照两版提示词。提供来源、收藏、确切版本、模型和共用变量，并说明是否执行与保存。Codex 请求确认模型调用时，可核对预览后确认本次执行。保存后在桌面或原网页变量工作区的 **「已保存比较」** 中输入返回的 `comparisonId` 即可重开。[Skill](../../.agents/skills/prompt-optimizer-compare/SKILL.md)
+在带仓库 Skill 的 Codex 项目里，可以直接请求 `$prompt-optimizer-compare` 完成上述对照。[Skill 与参数示例](../../.agents/skills/prompt-optimizer-compare/SKILL.md)
 
 ## 图片资源与完整备份
 
@@ -103,6 +103,7 @@ HTTPS 部署需要包含网页授权组件，并允许网页连接本机 MCP 的
 - save 不替换内容不同的现有图片，不触发自动淘汰。delete 需要 get/save 返回的 digest，并在刷新会话后拒绝删除仍被工作区/收藏引用的图片。
 - `imageCache` 的未引用图片仍受产品原有垃圾回收规则约束。需要长期保留时，应先建立有效的工作区引用或收藏图片引用；资源传输成功不表示已自动建立引用。删除已不存在的图片返回 `alreadyAbsent: true`。
 - package 导出/导入使用原完整资源包实现，包含应用 JSON、收藏、图片与校验清单；两者都须明确 `includeCredentials: true`。输入文件最多 20 MiB，桥响应最多 32 MiB；更大的资料使用产品备份界面。
+- MCP 运行归档保存在来源资料中，应用 JSON 和完整 ZIP 均不携带这些归档。导入旧 Beta 的混合备份时会恢复产品数据，跳过旧的 `savedComparisons` 和 `desktopRuns`。仅含旧归档的备份会在写入产品数据前被拒绝。
 - import 通过原会话恢复协调器、完整包校验及容量/哈希预检；正在运行的工作或保存冲突会阻止恢复。成功回执后刷新原产品界面，加载恢复的数据。
 - 每个变更使用独立 requestKey；`RESOURCE_RESULT_UNKNOWN` 表示结果未能确认，先检查实际资料/已有回执，不能换一个 key 重复执行。资源请求按顺序执行，避免上一条回执送达与 renderer 释放工作之间的竞争。
 
@@ -121,13 +122,13 @@ node scripts/desktop-main-isolated.mjs
 node scripts/desktop-business-ui.acceptance.mjs
 ```
 
-完整 UI 验收脚本只运行开发依赖中的 Electron，创建独立合成 profile，以空 env 构建真实产品 UI，拒绝访问真实 env、写出隔离目录、服务商网络、更新器及外部导航。通过独立 MCP 入口和本机回环模型夹具执行优化→测试→评估→显式保存；随后真实界面查看并退出重开；资源桥使用真实 IndexedDB。证据留在脚本打印的 `.codex-run/po-desktop-main-r2-product-*`，含运行摘要、阶段报告和截图。
+完整 UI 验收脚本只运行开发依赖中的 Electron，创建独立合成 profile，以空 env 构建真实产品 UI，拒绝访问真实 env、写出隔离目录、服务商网络、更新器及外部导航。通过独立 MCP 入口和本机回环模型夹具执行优化→测试→评估→显式保存；随后在真实产品首启和重启时检查顶部入口，并通过历史记录接口核对保存的优化结果；资源桥使用真实 IndexedDB。证据留在脚本打印的 `.codex-run/po-desktop-main-r2-product-*`，含运行摘要、阶段报告和截图。
 
 **回环夹具不是真实远端 LLM**，88 分仅验证结构/保存与展示，不证明优化质量。该验收没有调用付费服务商，也没有安装或发布桌面包、注册系统 MCP 配置、修改真实 profile、提交或推送代码。远端模型质量/费用、Windows 安装器、跨平台资源桥和 Chrome 真实数据接入不在这份通过声明内。
 
 ## 既有桌面验收记录
 
-2026-11-19 本地交付清单在 `.codex-run/desktop-mcp-delivery-20261119/manifest.json`，包含源码 SHA-256、命令与日志、原始隔离验收目录、运行标识及截图路径。它不是安装包或远端上线回执。
+下表记录 2026-11-19 当时版本的验收结果。当前可迁移的数据见[图片资源与完整备份](#图片资源与完整备份)。当时的交付清单位于 `.codex-run/desktop-mcp-delivery-20261119/manifest.json`，包含源码 SHA-256、命令与日志、原始隔离验收目录、运行标识及截图路径。
 
 | 桌面功能 | 对应 MCP 入口 | 已有证据与未覆盖项 |
 | --- | --- | --- |
@@ -135,15 +136,15 @@ node scripts/desktop-business-ui.acceptance.mjs
 | 模板 | `templates`；运行的 `templateId` | 从实际内置模板目录选择并完成优化；自定义模板的每种编辑交互未逐项界面验收 |
 | 文本模型与提供商 | `models/providers`；`model-list/model-test` | 两份独立已存配置、配置脱敏、动态列表及连接测试通过回环协议验收；未请求真实服务商 |
 | 图像模型与提供商 | `imageModels/imageProviders`；`image-model-list/image-model-test` | 已接现有配置与适配器目录；未做远端图像模型发现、连接或生成验收 |
-| 优化、迭代、多消息优化 | `optimize/iterate/optimize-message` | 优化经过真实 Core、SQLite、stdio 和桌面保存重开；迭代及多消息优化的远端行为未单独验收 |
+| 优化、迭代、多消息优化 | `optimize/iterate/optimize-message` | 优化通过 stdio 调用真实 Core，结果存入 SQLite 后可从桌面历史记录读回；迭代及多消息优化的远端行为未单独验收 |
 | 单次、多消息与多版本/多模型测试 | `test/test-conversation/test-batch` | 单测、同模型双提示词、两个准确版本与两份模型配置、变量替换、部分输出和取消已验证；完整多消息测试与所有模型组合未穷举 |
-| 提示词/结果评估 | `evaluate` | result 类型完成独立 runId、取回、归档和实际桌面重开；88 分为合成响应，不是质量评测。其他评估类型复用现有服务，但未逐个远端验收 |
-| 历史与保存成果 | `history`；`po_runs_save/get/list/delete` | 优化进入原历史链、重复保存幂等；优化/测试/评估三份成果在真实 UI 首启和重启分别按 ID 重开；归档导入、防复活标记经过真实仓库测试 |
+| 提示词/结果评估 | `evaluate` | result 类型生成独立 runId，可通过 MCP 取回和归档；88 分为合成响应，不是质量评测。其他评估类型复用现有服务，但未逐个远端验收 |
+| 历史与保存成果 | `history`；`po_runs_save/get/list/delete` | 优化进入原历史链、重复保存幂等；桌面首启和重启后均能从产品历史记录读回优化结果，测试与评估归档通过 MCP 按 ID 查询；归档导入、防复活标记经过真实仓库测试 |
 | 多消息上下文 | `contexts`、`workspaces` | 现有服务方法解析及工作区导入校验通过；没有承诺每个消息编辑控件都做过界面回归 |
 | 全局变量 | `variables`；变量提取/生成运行 | 与 UI 共用名字校验、保留其他状态；变量化批测通过。提取/生成的远端输出未单独验收 |
 | 工作区、设置与并发编辑 | `workspaces/settings` | 外部偏好更新重读、旧 revision 拒绝、原子提交与幂等、损坏数据拒绝已测；活动桌面拒绝直接替换状态，未实现所有页面实时无刷新同步 |
 | 图片与理解/生成 | `po_resources images.*`；`image/image-understand` | 实际 renderer/IndexedDB 保存、读取、列出和删除通过；带收藏引用的图片随完整 ZIP 恢复并在进程重启后逐字节一致。引用保护由真实服务加合成 IndexedDB 单元验证；远端图像生成/理解与原生格式转换未验收 |
 | 数据导入导出 | `data`、`po_data_export_file`、`po_resources package.*` | 真实 Core 数据/工作区回归、凭据查询脱敏、归档导入与完整资源 ZIP 导出/导入通过；大于资源桥限额的资料继续使用桌面 UI |
-| 原比较和旧客户端 | 已有客户端配置 | 两种冻结比较及保存重开、只读无写入、EOF 退出、原 stdio、HTTP `/mcp` 初始化/会话/三工具发现均通过；没有改变旧客户端配置 |
+| 原比较和旧客户端 | 已有客户端配置 | 两种冻结比较及通过 MCP 读回保存的结果、只读无写入、EOF 退出、原 stdio、HTTP `/mcp` 初始化/会话/三工具发现均通过；没有改变旧客户端配置 |
 
 验收分层：Core 定向回归 **123** 项、MCP 业务单元 **10** 项、新入口实际 stdio **1** 项、只读单元 **14** 项、旧/比较实际协议 **7** 项、UI 单元 **2** 项、IPC 静态合同 **20** 项；另有实际 Electron main/preload 三阶段和完整产品 UI 两阶段。原生进程验收的网络审计为零外部请求；完整 UI 验收的三次模型请求仅发往隔离脚本创建的本机端点。

@@ -3,8 +3,6 @@ import { ref, shallowRef, onMounted, type Ref } from 'vue'
 import {
   StorageFactory,
   DexieStorageProvider,
-  createComparisonRepository,
-  createDesktopRunRepository,
   createBrowserBridgeHost,
   STARTUP_REPAIR_REPORT_PREFERENCE_KEY,
   createModelManager,
@@ -243,7 +241,6 @@ export function useAppInitializer(): {
           templateManager,
           historyManager,
           dataManager,
-          savedComparisons: window.electronAPI?.savedComparisons,
           llmService,
           promptService,
           templateLanguageService, // 使用代理而不是null
@@ -447,9 +444,6 @@ export function useAppInitializer(): {
 
         // 创建 ContextRepo（使用相同的存储提供器）
         const contextRepo = createContextRepo(storageProvider);
-        if (!(storageProvider instanceof DexieStorageProvider)) throw new Error('Web storage is unavailable');
-        const savedComparisons = createComparisonRepository(storageProvider);
-        const productRuns = createDesktopRunRepository(storageProvider);
 
         // 创建 DataManager（需要contextRepo）
         dataManager = createDataManager(
@@ -459,8 +453,6 @@ export function useAppInitializer(): {
           preferenceService,
           contextRepo,
           imageModelManagerInstance,
-          savedComparisons,
-          productRuns,
         );
 
         // 创建收藏管理器
@@ -508,8 +500,8 @@ export function useAppInitializer(): {
           console.warn('[AppInitializer] Failed to read context mode; using default value:', err);
         }
 
-        const browserBridge = ['http:', 'https:'].includes(window.location.protocol)
-          ? createBrowserBridgeHost({ storage: storageProvider, favoriteManager, registry: textAdapterRegistryInstance, llmService, promptService }) : undefined;
+        const browserBridge = ['http:', 'https:'].includes(window.location.protocol) && storageProvider instanceof DexieStorageProvider
+          ? createBrowserBridgeHost({ storage: storageProvider }) : undefined;
 
         // 将所有服务实例赋值给 services.value
         services.value = {
@@ -517,13 +509,7 @@ export function useAppInitializer(): {
           templateManager: templateManagerAdapter, // 使用适配器
           historyManager: historyManagerAdapter, // 使用适配器
           dataManager,
-          savedComparisons,
           browserBridge,
-          browserRuns: browserBridge ? {
-            list: async () => (await productRuns.list()).filter(run => run.saved && !run.deleted),
-            get: productRuns.get,
-            delete: productRuns.delete,
-          } : undefined,
           llmService,
           promptService,
           templateLanguageService: languageService,
