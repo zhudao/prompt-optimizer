@@ -18,7 +18,9 @@ const imageResult = {
 }
 
 const arena = createArenaState()
-const snapshotFor = (mode: LegacySessionSubModeKey) => mode === 'arena' ? arena : ({
+const snapshotFor = (mode: LegacySessionSubModeKey) => mode === 'arena' ? arena : mode === 'video-create' ? {
+  originalPrompt: 'a flower opens', optimizedPrompt: 'a slow tracking shot', lastActiveAt: 1,
+} : ({
   ...(mode === 'pro-multi' ? {
     conversationMessagesSnapshot: [{ id: 'message-1', role: 'user', content: '原始消息', originalContent: '原始消息' }],
     selectedMessageId: 'message-1', messageChainMap: { 'message-1': 'chain-1' },
@@ -71,7 +73,7 @@ describe('Workspace session transfer in unified backups', () => {
     const source = createDataManager(new PreferenceService(storage))
     const exported = JSON.parse(await source.manager.exportAllData())
     expect(exported.data.workspaceSessions.version).toBe(1)
-    expect(Object.keys(exported.data.workspaceSessions.sessions)).toHaveLength(8)
+    expect(Object.keys(exported.data.workspaceSessions.sessions)).toHaveLength(9)
     expect(exported.data.userSettings).toEqual({ 'app:settings:ui:theme-id': 'dark' })
 
     const destination = new PreferenceService(new MemoryStorageProvider())
@@ -229,5 +231,17 @@ describe('Workspace session transfer in unified backups', () => {
       'basic-user': snapshotFor('basic-user'),
     } })).rejects.toThrow('rollback failed')
     expect(await preferences.get('session/v1/basic-system', null)).toEqual({ ...first, prompt: 'newer independent commit' })
+  })
+
+  it('recovers an oversized or unreadable stored session when importing a valid backup', async () => {
+    const key = 'pref:session/v1/video-create'
+    const oversized = JSON.stringify({ originalPrompt: 'x'.repeat(1024 * 1024), runs: [{ id: 'cgt-old' }] })
+    await storage.setItem(key, oversized)
+    const replacement = snapshotFor('video-create')
+    await new WorkspaceSessionTransfer(preferences).importData({
+      version: 1,
+      sessions: { 'video-create': replacement },
+    })
+    expect(await preferences.get('session/v1/video-create', null)).toEqual(replacement)
   })
 })

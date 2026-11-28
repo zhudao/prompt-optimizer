@@ -1,3 +1,4 @@
+import { useVideoCreateSession } from '../../stores/session/useVideoCreateSession'
 /**
  * App 级别历史记录恢复 Composable
  *
@@ -131,6 +132,24 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
         const { record, chain } = context
         // rootRecord.type 可能包含旧版本类型名，显式转为 string 以兼容历史数据
         const rt = chain.rootRecord.type as unknown as string
+        if (rt === 'videoOptimize') {
+            const store = useVideoCreateSession()
+            if (store.busy) return
+            if (beforeApplyToWorkspace && !(await beforeApplyToWorkspace('video-create'))) return
+            if (await navigateToSubModeKey('video-create') === false || store.busy) return
+            store.applyPrompt(chain.rootRecord.originalPrompt, record.optimizedPrompt, record.id, chain.chainId)
+            const modelKey = record.modelKey || chain.rootRecord.modelKey
+            if (modelKey) store.state.selectedTextModelKey = modelKey
+            const rootTemplate = chain.rootRecord.templateId
+            if (rootTemplate && rootTemplate !== 'video-create') store.updateTemplate(rootTemplate)
+            if (record.type === 'iterate' && record.templateId) store.updateIterateTemplate(record.templateId)
+            if (!await store.saveSession()) {
+                toast.warning(t('toast.warning.saveHistoryFailed'))
+            } else {
+                toast.success(t('toast.success.historyLoaded'))
+            }
+            return
+        }
 
         // 🆕 扩展模式切换逻辑 - 支持图像模式
         if (

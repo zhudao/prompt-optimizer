@@ -278,6 +278,7 @@ export class PromptService implements IPromptService {
     modelKey: string,
     templateId?: string,
     contextData?: {
+      inputImages?: ImageInputRef[];
       messages?: ConversationMessage[];
       selectedMessageId?: string;
       variables?: Record<string, string>;
@@ -333,13 +334,13 @@ export class PromptService implements IPromptService {
       }
 
       // 使用TemplateProcessor处理模板和变量替换
-      const context: TemplateContext = {
+      const context = TemplateProcessor.createExtendedContext({
         originalPrompt,
         lastOptimizedPrompt,
         iterateInput,
-        customVariables: contextData?.variables,
         tools: contextData?.tools,
-      };
+        hasInputImages: !!contextData?.inputImages?.length,
+      }, contextData?.variables);
 
       // 如果有会话消息，将其格式化为文本并添加到上下文
       if (contextData?.messages && contextData.messages.length > 0) {
@@ -359,12 +360,19 @@ export class PromptService implements IPromptService {
 
       const messages = TemplateProcessor.processTemplate(template, context);
 
-      // 发送请求
+      if (contextData?.inputImages?.length) {
+        const imageService = this.requireImageUnderstandingService();
+        const result = await imageService.understand({
+          modelConfig,
+          ...this.splitMultimodalMessages(messages),
+          images: contextData.inputImages,
+        });
+        this.validateResponse(result.content, lastOptimizedPrompt);
+        return result.content;
+      }
+
       const result = await this.llmService.sendMessage(messages, modelKey);
-
-      // 注意：迭代历史记录保存由UI层的historyManager.addIteration方法处理
-      // 移除重复的addRecord调用以避免重复保存
-
+      this.validateResponse(result, lastOptimizedPrompt);
       return result;
     } catch (error) {
       const errorMessage =
@@ -1004,6 +1012,8 @@ export class PromptService implements IPromptService {
       | "text2imageOptimize"
       | "image2imageOptimize"
       | "multiimageOptimize"
+      | "videoOptimize"
+      | "videoIterate"
       | "imageIterate"
       | "iterate"
       | "conversationMessageOptimize"
@@ -1031,6 +1041,7 @@ export class PromptService implements IPromptService {
         | "text2imageOptimize"
         | "image2imageOptimize"
         | "multiimageOptimize"
+        | "videoOptimize"
         | "iterate"
       )[] = [];
 
@@ -1057,6 +1068,10 @@ export class PromptService implements IPromptService {
         fallbackTypes = ["image2imageOptimize", "text2imageOptimize", "userOptimize", "optimize"];
       } else if (templateType === "imageIterate") {
         fallbackTypes = ["iterate", "text2imageOptimize", "userOptimize"]; // 图像迭代回退到通用迭代/文生图
+      } else if (templateType === "videoOptimize") {
+        fallbackTypes = ["userOptimize", "optimize"];
+      } else if (templateType === "videoIterate") {
+        fallbackTypes = ["iterate", "videoOptimize", "userOptimize"];
       }
 
       for (const fallbackType of fallbackTypes) {
